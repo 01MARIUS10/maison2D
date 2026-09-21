@@ -23,7 +23,7 @@ async function createPlan() {
   createError.value = null
   try {
     const plan = await planStore.createPlan(`Atelier ${planStore.plans.length + 1}`)
-    await router.push({ name: 'atelier-terrain', params: { planId: plan.id } })
+    await router.push({ name: 'atelier-structure', params: { planId: plan.id }, query: { step: 'terrain' } })
   } catch (error) {
     createError.value = error instanceof Error ? error.message : "Impossible de créer l'atelier."
   } finally {

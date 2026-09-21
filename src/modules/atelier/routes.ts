@@ -17,10 +17,10 @@ export const atelierRoutes: RouteRecordRaw[] = [
         redirect: (to) => ({ name: 'atelier-structure', params: { planId: to.params.planId } }),
       },
       {
+        // Ancienne adresse : le terrain se définit maintenant à l'étape 1 de l'éditeur.
         path: ':planId/terrain',
         name: 'atelier-terrain',
-        component: () => import('./terrain/views/TerrainSetupView.vue'),
-        props: true,
+        redirect: (to) => ({ name: 'atelier-structure', params: { planId: to.params.planId }, query: { step: 'terrain' } }),
       },
       {
         path: ':planId/structure',

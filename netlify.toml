@@ -1,0 +1,17 @@
+# Déploiement Netlify. Les variables VITE_SUPABASE_URL et VITE_SUPABASE_ANON_KEY se règlent dans l'interface
+# (Site configuration -> Environment variables), PAS ici : ce fichier est versionné, pas .env.
+
+[build]
+  command = "npm run build"
+  publish = "dist"
+
+[build.environment]
+  # Vite 8 demande Node 20.19+ ou 22.12+ : on fixe la version au lieu de dépendre du défaut de Netlify.
+  NODE_VERSION = "22"
+
+# Application à page unique (Vue Router en mode « history ») : toute adresse doit servir index.html, sinon
+# recharger /atelier/<id>/structure ou ouvrir un lien direct donne une page 404 de Netlify.
+[[redirects]]
+  from = "/*"
+  to = "/index.html"
+  status = 200

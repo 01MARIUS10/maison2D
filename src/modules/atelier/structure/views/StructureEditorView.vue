@@ -61,6 +61,14 @@ const toasts = useToasts()
 const isDirty = computed(() => planStore.isDirty(props.planId))
 const isSaving = computed(() => planStore.isSaving(props.planId))
 
+// Un atelier sans nom ne se retrouverait pas dans la liste : un nom vide est remplacé, et les espaces autour retirés.
+function onNameBlur() {
+  const current = plan.value
+  if (!current) return
+  const name = current.nom.trim()
+  current.nom = name === '' ? 'Sans titre' : name
+}
+
 // --- Mode « Tout déplacer » --------------------------------------------------------
 // Un clic sur le bouton active le mode (curseur en main) : on fait alors glisser TOUT le contenu d'un bloc, à la
 // souris ou aux flèches, dans le repère qui reste fixe. Un nouveau clic sur le bouton (ou Échap) quitte le mode.
@@ -1016,8 +1024,17 @@ onBeforeUnmount(() => {
     <RouterLink to="/atelier" class="text-sm text-gray-600 underline">← Mes ateliers</RouterLink>
 
     <div class="mt-2 flex items-center justify-between gap-4">
-      <div>
-        <h1 class="text-2xl font-semibold text-gray-900">{{ plan.nom }}</h1>
+      <div class="min-w-0 flex-1">
+        <!-- Le nom se modifie directement dans le titre (enregistré comme le reste du plan). -->
+        <input
+          v-model="plan.nom"
+          type="text"
+          maxlength="80"
+          aria-label="Nom de l'atelier"
+          class="-ml-1 w-full max-w-xl rounded-md border border-transparent bg-transparent px-1 text-2xl font-semibold text-gray-900 hover:border-gray-300 focus:border-gray-900 focus:outline-none"
+          @blur="onNameBlur"
+          @keydown.enter="($event.target as HTMLInputElement).blur()"
+        />
         <p v-if="plan.terrain" class="mt-1 text-sm text-gray-600">
           Terrain ≈ {{ Math.round(terrainArea(plan.terrain)) }} m²
         </p>

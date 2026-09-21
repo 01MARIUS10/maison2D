@@ -515,87 +515,97 @@ function onFencedChange(e: Event) {
         <li v-if="gates.length === 0" class="text-xs text-gray-500">Aucune porte d'entrée.</li>
       </ul>
     </div>
+  </div>
 
-    <Teleport to="body">
-      <div
-        v-if="showGpsForm"
-        class="fixed inset-0 z-50 flex items-center justify-center bg-black/50 p-4"
-        @click.self="showGpsForm = false"
-      >
-        <div class="max-h-[85vh] w-full max-w-md overflow-y-auto rounded-lg bg-white p-4 shadow-xl">
-          <div class="flex items-center justify-between">
-            <h3 class="text-sm font-semibold text-gray-900">Réinitialiser le terrain via carte</h3>
-            <button type="button" class="text-gray-400 hover:text-gray-600" aria-label="Fermer" @click="showGpsForm = false">
-              ✕
-            </button>
-          </div>
+  <!-- Atelier vide : on crée le terrain avec la même saisie de coordonnées GPS que pour le réinitialiser. -->
+  <div v-else class="rounded-lg border border-gray-200 p-3">
+    <h2 class="text-sm font-semibold text-gray-900">Terrain</h2>
+    <button
+      type="button"
+      class="mt-3 rounded-md bg-gray-900 px-3 py-1.5 text-sm font-medium text-white"
+      @click="openGpsForm"
+    >
+      Définir le terrain via carte
+    </button>
+  </div>
 
-          <div class="mt-3 space-y-3">
-            <div v-for="(row, index) in gpsForm" :key="index" class="space-y-1 rounded-md border border-gray-200 p-2">
-              <div class="flex items-center gap-1">
-                <input
-                  v-model="row.label"
-                  type="text"
-                  placeholder="Label"
-                  class="min-w-0 flex-1 rounded border border-gray-300 px-1.5 py-1 text-xs focus:border-gray-900 focus:outline-none"
-                />
-                <button
-                  type="button"
-                  class="shrink-0 text-xs text-red-600 hover:text-red-700"
-                  :disabled="gpsForm.length <= 3"
-                  :class="{ 'opacity-30': gpsForm.length <= 3 }"
-                  @click="removeGpsVertexRow(index)"
-                >
-                  ✕
-                </button>
-              </div>
-              <div class="flex items-center gap-1">
-                <input
-                  v-model="row.lat"
-                  type="text"
-                  inputmode="decimal"
-                  placeholder="Latitude (ou 18°56'32.9&quot;S)"
-                  class="min-w-0 flex-1 rounded border border-gray-300 px-1.5 py-1 text-xs focus:border-gray-900 focus:outline-none"
-                  @paste="onCoordinatePaste(row, 'lat', $event)"
-                  @blur="normalizeCoordinateField(row, 'lat')"
-                />
-                <input
-                  v-model="row.lng"
-                  type="text"
-                  inputmode="decimal"
-                  placeholder="Longitude"
-                  class="min-w-0 flex-1 rounded border border-gray-300 px-1.5 py-1 text-xs focus:border-gray-900 focus:outline-none"
-                  @paste="onCoordinatePaste(row, 'lng', $event)"
-                  @blur="normalizeCoordinateField(row, 'lng')"
-                />
-              </div>
-            </div>
+  <Teleport to="body">
+    <div
+      v-if="showGpsForm"
+      class="fixed inset-0 z-50 flex items-center justify-center bg-black/50 p-4"
+      @click.self="showGpsForm = false"
+    >
+      <div class="max-h-[85vh] w-full max-w-md overflow-y-auto rounded-lg bg-white p-4 shadow-xl">
+        <div class="flex items-center justify-between">
+          <h3 class="text-sm font-semibold text-gray-900">
+          {{ terrain ? 'Réinitialiser le terrain via carte' : 'Définir le terrain via carte' }}
+        </h3>
+          <button type="button" class="text-gray-400 hover:text-gray-600" aria-label="Fermer" @click="showGpsForm = false">
+            ✕
+          </button>
+        </div>
 
-            <button type="button" class="text-xs font-medium text-gray-900 underline" @click="addGpsVertexRow">
-              + Ajouter un sommet
-            </button>
-
-            <p v-if="gpsFormError" class="text-xs text-red-600">{{ gpsFormError }}</p>
-
-            <div class="flex justify-end gap-2 pt-1">
+        <div class="mt-3 space-y-3">
+          <div v-for="(row, index) in gpsForm" :key="index" class="space-y-1 rounded-md border border-gray-200 p-2">
+            <div class="flex items-center gap-1">
+              <input
+                v-model="row.label"
+                type="text"
+                placeholder="Label"
+                class="min-w-0 flex-1 rounded border border-gray-300 px-1.5 py-1 text-xs focus:border-gray-900 focus:outline-none"
+              />
               <button
                 type="button"
-                class="rounded-md border border-gray-300 px-3 py-1.5 text-xs text-gray-700 hover:bg-gray-50"
-                @click="showGpsForm = false"
+                class="shrink-0 text-xs text-red-600 hover:text-red-700"
+                :disabled="gpsForm.length <= 3"
+                :class="{ 'opacity-30': gpsForm.length <= 3 }"
+                @click="removeGpsVertexRow(index)"
               >
-                Annuler
-              </button>
-              <button type="button" class="rounded-md bg-gray-900 px-3 py-1.5 text-xs font-medium text-white" @click="confirmGpsReset">
-                Réinitialiser le terrain
+                ✕
               </button>
             </div>
+            <div class="flex items-center gap-1">
+              <input
+                v-model="row.lat"
+                type="text"
+                inputmode="decimal"
+                placeholder="Latitude (ou 18°56'32.9&quot;S)"
+                class="min-w-0 flex-1 rounded border border-gray-300 px-1.5 py-1 text-xs focus:border-gray-900 focus:outline-none"
+                @paste="onCoordinatePaste(row, 'lat', $event)"
+                @blur="normalizeCoordinateField(row, 'lat')"
+              />
+              <input
+                v-model="row.lng"
+                type="text"
+                inputmode="decimal"
+                placeholder="Longitude"
+                class="min-w-0 flex-1 rounded border border-gray-300 px-1.5 py-1 text-xs focus:border-gray-900 focus:outline-none"
+                @paste="onCoordinatePaste(row, 'lng', $event)"
+                @blur="normalizeCoordinateField(row, 'lng')"
+              />
+            </div>
+          </div>
+
+          <button type="button" class="text-xs font-medium text-gray-900 underline" @click="addGpsVertexRow">
+            + Ajouter un sommet
+          </button>
+
+          <p v-if="gpsFormError" class="text-xs text-red-600">{{ gpsFormError }}</p>
+
+          <div class="flex justify-end gap-2 pt-1">
+            <button
+              type="button"
+              class="rounded-md border border-gray-300 px-3 py-1.5 text-xs text-gray-700 hover:bg-gray-50"
+              @click="showGpsForm = false"
+            >
+              Annuler
+            </button>
+            <button type="button" class="rounded-md bg-gray-900 px-3 py-1.5 text-xs font-medium text-white" @click="confirmGpsReset">
+              {{ terrain ? 'Réinitialiser le terrain' : 'Créer le terrain' }}
+            </button>
           </div>
         </div>
       </div>
-    </Teleport>
-  </div>
-
-  <p v-else class="rounded-lg border border-gray-200 p-3 text-sm text-gray-600">
-    Aucun terrain défini pour cet atelier.
-  </p>
+    </div>
+  </Teleport>
 </template>
