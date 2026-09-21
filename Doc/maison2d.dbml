@@ -1,0 +1,463 @@
+// ============================================================================
+// maison2D — structure de données (DBML pour https://dbdiagram.io)
+// Généré à partir du code au 2026-09-21 :
+//   - src/modules/*/types/index.ts   (modèle métier côté front)
+//   - supabase/migrations/*.sql      (base réellement créée)
+//
+// Toutes les tables sont CRÉÉES dans Supabase (migrations 20260917095342_create_profiles.sql et
+// 20260921120000_create_plan_schema.sql), en deux groupes :
+//   1. « Base Supabase »     -> compte et profil : auth.users + profiles.
+//   2. « Modèle du plan »    -> le plan de maison, traduction relationnelle à plat des types TypeScript.
+//                               Il est LU depuis Supabase par l'application (plan.queries.ts / plan.mapper.ts) ;
+//                               les modifications sont ÉCRITES par le bouton « Enregistrer » (save_plan, plan.rows.ts).
+//
+// Conventions du modèle du plan :
+//   - Toutes les longueurs/coordonnées sont en MÈTRES, dans le repère local du plan (axe Y vers le haut).
+//     Ce repère est relatif : ce n'est pas une coordonnée GPS absolue (sauf lat/lng des bornes GPS).
+//   - Un PlanPoint {x, y} est aplati en deux colonnes (ex: center_x, center_y).
+//   - Les rotations sont en DEGRÉS, sens trigonométrique (antihoraire, axe Y vers le haut).
+//   - Jamais stockés car calculés à la volée : aire, périmètre, coins d'un rectangle (à partir de
+//     center/width/height/rotation), centre du terrain, direction du nord, inventaire.
+//   - Bord d'un rectangle (pièce ou base de maison), dans son repère local : 0 = bas, 1 = droite,
+//     2 = haut, 3 = gauche. `offset_m` = distance en mètres depuis le début du bord.
+//   - Côté du terrain : le côté i va du point i au point i+1 (le dernier revient au premier).
+//   - Coordonnées, longueurs et angles en `float8` (double precision) et NON en numeric(x,3) : l'application
+//     calcule des flottants (rotations, projection GPS, arrêts au bord à 1e-9 près). Arrondir au millimètre en
+//     base ferait basculer les contrôles « pièce dans le terrain » sur les positions limites. L'API Supabase
+//     renvoie les float8 avec 15 chiffres significatifs : écart mesuré sur la vraie base 4e-14 m, sans effet.
+//   - Toutes les clés étrangères du modèle du plan sont `on delete cascade` : supprimer un plan supprime tout
+//     ce qui en dépend (terrain, base, pièces, ouvertures…).
+//   - Enregistrement : la fonction `public.save_plan(p_data jsonb)` (migration 20260921180000) remplace tout le
+//     contenu d'un plan EN UNE TRANSACTION (tout ou rien) ; elle s'exécute avec les droits de l'appelant, donc la RLS
+//     s'applique. L'application ne fait jamais d'écritures table par table. Chaque enregistrement recrée les lignes
+//     du plan : les ids du modèle (pièces, ouvertures, portes…) sont conservés, ceux qui n'existent que en base
+//     (points du terrain, ligne de la base de maison) sont regénérés, sans effet visible.
+//   - Sécurité (RLS) : un utilisateur ne voit et ne modifie que les données de SES plans. Seule `plans`
+//     compare `user_id` à auth.uid() ; les autres tables se rattachent à leur parent (sous-requête soumise à
+//     la RLS du parent), donc la propriété se propage sans être recopiée.
+// ============================================================================
+
+Project maison2d {
+  database_type: 'PostgreSQL'
+  Note: '''
+  **maison2D** — éditeur de plans de maison 2D (Vue 3 + Supabase + Konva).
+  Schéma `public` de Supabase.
+  '''
+}
+
+// ----------------------------------------------------------------------------
+// Énumérations (types TypeScript de l'application)
+// ----------------------------------------------------------------------------
+
+Enum terrain_input_mode {
+  gps     [note: 'Sommets saisis en latitude/longitude, projetés en mètres']
+  manual  [note: 'Contour dessiné à la main sur le canvas']
+}
+
+Enum terrain_point_kind {
+  vertex      [note: 'Sommet du polygone du terrain (compte dans l’aire et le confinement)']
+  annotation  [note: 'Repère hors polygone (ex: ancienne limite), indicatif seulement']
+}
+
+Enum gate_kind {
+  pedestrian  [note: 'Portillon (largeur par défaut 1 m)']
+  vehicle     [note: 'Portail (largeur par défaut 3 m)']
+}
+
+Enum wall_type {
+  "brique-11"  [note: 'Mur de 11 cm (brique)']
+  "brique-22"  [note: 'Mur de 22 cm (brique)']
+  parpaing     [note: 'Parpaing — dessiné à 20 cm']
+}
+
+Enum room_category {
+  salon
+  chambre
+  cuisine
+  "salle-a-manger"
+  "salle-de-bain"
+  wc
+  garage
+  escalier
+  couloir
+  autre
+}
+
+Enum opening_kind {
+  interior  [note: 'Porte intérieure']
+  entrance  [note: 'Porte d’entrée']
+  window    [note: 'Fenêtre (pièces uniquement, pas la base de la maison)']
+}
+
+Enum wall_opening_type {
+  door
+  window
+}
+
+Enum furniture_category {
+  mobilier
+  cuisine
+  "salle-de-bain"
+}
+
+Enum technical_symbol_type {
+  prise
+  interrupteur
+  "point-lumineux"
+  "arrivee-eau"
+  "evacuation-eau"
+}
+
+// ----------------------------------------------------------------------------
+// Légende des statuts utilisés dans les notes des tables :
+//   [EN BASE]   table réellement créée dans Supabase (c'est le cas de TOUTES les tables de ce fichier).
+//   [EN BASE · UTILISÉE]  en plus, alimentée par l'éditeur actuel (lue depuis Supabase ; sauvegarde des modifications à faire).
+//   [EN BASE · RÉSERVÉE]  modélisée mais SANS interface : aucune donnée n'y est écrite aujourd'hui.
+// ----------------------------------------------------------------------------
+
+// ----------------------------------------------------------------------------
+// 1. Base Supabase — DÉJÀ CRÉÉE (migration 20260917095342_create_profiles.sql)
+// ----------------------------------------------------------------------------
+
+// Comptes de connexion gérés par Supabase Auth. On ne les modifie pas : on s'y raccroche uniquement.
+Table auth.users {
+  id uuid [pk, note: 'Identifiant de l’utilisateur ; sert de clé à `profiles.id`']
+  email text [note: 'Adresse de connexion ; recopiée dans `profiles.mail` à l’inscription']
+  encrypted_password text [note: 'Mot de passe haché par Supabase — jamais lu ni copié par l’application']
+  raw_user_meta_data jsonb [note: 'Contient nom, ville, pays passés à `supabase.auth.signUp` ; le trigger les recopie dans `profiles`']
+
+  Note: '''
+  [EN BASE] Géré par Supabase Auth (schéma `auth`). Non modifié par le projet.
+  Le mot de passe n'est jamais copié dans `profiles`.
+  '''
+}
+
+// Fiche d'identité de l'utilisateur (nom, ville, pays), liée 1:1 à son compte de connexion.
+Table profiles {
+  id uuid [pk, ref: - auth.users.id, note: 'Même valeur que auth.users.id ; `on delete cascade` : supprimer le compte supprime le profil']
+  nom text [not null, note: 'Nom affiché dans l’en-tête de l’application']
+  ville text [not null, note: 'Ville de l’utilisateur']
+  pays text [not null, note: 'Pays de l’utilisateur']
+  mail text [not null, note: 'Copie de l’adresse de connexion (auth.users.email) au moment de l’inscription']
+  created_at timestamptz [not null, default: `now()`, note: 'Date de création du profil']
+
+  Note: '''
+  [EN BASE] Profil utilisateur, lié 1:1 à auth.users.
+  Créé automatiquement par le trigger `on_auth_user_created` -> `handle_new_user()` à l'inscription.
+  RLS activée : un utilisateur ne lit et ne modifie que son propre profil (select/update ; pas d'insert ni de delete côté client).
+  '''
+}
+
+// ----------------------------------------------------------------------------
+// 2. Modèle du plan — migration 20260921120000_create_plan_schema.sql
+// ----------------------------------------------------------------------------
+
+// Racine de tout : un « atelier » = un plan de maison appartenant à un utilisateur.
+// Tout le reste (terrain, base, pièces, meubles…) s'y rattache directement ou indirectement.
+Table plans {
+  id uuid [pk, note: 'Plan.id']
+  user_id uuid [not null, ref: > profiles.id, note: 'Plan.userId — propriétaire du plan (retiré de l’export JSON)']
+  nom text [not null, note: 'Nom de l’atelier, ex: « Maison Andria »']
+  wall_type wall_type [not null, default: 'brique-22', note: 'Épaisseur des murs, choix GLOBAL pour toutes les pièces du plan (étape « Pièces et accès »)']
+  created_at timestamptz [not null, default: `now()`, note: 'Date de création du plan']
+  updated_at timestamptz [not null, default: `now()`, note: 'Dernière modification ; mise à jour par un trigger (set_updated_at) — sert à trier les ateliers du plus récent au plus ancien']
+
+  Note: '''
+  [EN BASE · UTILISÉE] Agrégat racine : un « atelier ». Lu depuis Supabase et enregistré par le bouton « Enregistrer » de l'éditeur.
+  Un plan contient au plus 1 terrain, au plus 1 base de maison, et autant de pièces que voulu.
+  La RLS suivra le modèle de `profiles` (un utilisateur ne voit que ses plans).
+  '''
+}
+
+// --- Terrain et périphérie (étape 1) ----------------------------------------
+
+// Le terrain : le polygone qui contient tout le reste. Les bornes sont dans `terrain_points`.
+Table terrains {
+  id uuid [pk, note: 'Terrain.id']
+  plan_id uuid [not null, unique, ref: - plans.id, note: 'Un plan a au plus un terrain (Plan.terrain peut être null) — relation 1:1']
+  input_mode terrain_input_mode [not null, note: 'Comment le contour a été saisi : gps (lat/lng) ou manual (dessin)']
+  fenced boolean [not null, default: false, note: 'Clôture sur TOUT le périmètre, sauf au niveau des portes d’entrée (terrain_gates)']
+
+  Note: '''
+  [EN BASE · UTILISÉE] Le terrain. Aire, périmètre et centre sont calculés depuis `terrain_points`, jamais stockés.
+  Tout ce qui est « périphérie » s'y rattache : route (`roads`), portes d'entrée (`terrain_gates`), clôture (`fenced`).
+  '''
+}
+
+// Les bornes du terrain, dans l'ordre : leur enchaînement forme le contour.
+Table terrain_points {
+  id uuid [pk]
+  terrain_id uuid [not null, ref: > terrains.id, note: 'Terrain auquel appartient ce point']
+  kind terrain_point_kind [not null, default: 'vertex', note: 'vertex = sommet du contour ; annotation = repère hors contour (indicatif)']
+  position int [not null, note: 'Ordre dans le polygone (0, 1, 2…) — définit les côtés : le côté i va du point i au point i+1']
+  label text [note: 'Repère visuel : « B1 », « B1-2 »…']
+  x float8 [not null, note: 'PlanPoint.x, en mètres (repère local du plan)']
+  y float8 [not null, note: 'PlanPoint.y, en mètres (repère local du plan)']
+  lat float8 [note: 'Latitude ; renseignée seulement si terrains.input_mode = gps']
+  lng float8 [note: 'Longitude ; renseignée seulement si terrains.input_mode = gps']
+
+  indexes {
+    (terrain_id, kind, position) [unique]
+  }
+
+  Note: '''
+  [EN BASE · UTILISÉE] TerrainVertex : `vertices` (kind = vertex) et `annotations` (kind = annotation) du terrain.
+  Après une rotation ou un déplacement du terrain, lat/lng ne sont PAS recalculés (ils deviennent approximatifs).
+  Un terrain a au minimum 3 points de type vertex.
+  '''
+}
+
+// La route qui longe le terrain : un rectangle libre que l'on peut déplacer et orienter.
+Table roads {
+  terrain_id uuid [pk, ref: - terrains.id, note: 'Un terrain a au plus une route — relation 1:1']
+  center_x float8 [not null, note: 'Centre de la route, x en mètres']
+  center_y float8 [not null, note: 'Centre de la route, y en mètres']
+  length_m float8 [not null, note: 'Longueur, dans le sens de la route']
+  width_m float8 [not null, note: 'Largeur de la chaussée (4 m par défaut)']
+  rotation float8 [not null, default: 0, note: 'Orientation en degrés, sens trigonométrique']
+
+  Note: '''
+  [EN BASE · UTILISÉE] Terrain.road : rectangle LIBRE (déplaçable, orientable), indépendant des côtés du terrain.
+  « Poser le long d'un côté » n'est qu'un raccourci qui calcule ces valeurs ; aucun lien vers un côté n'est stocké.
+  '''
+}
+
+// Les portes d'entrée du TERRAIN : ouvertures dans la clôture (portillon pour piétons, portail pour véhicules).
+// À ne pas confondre avec les portes de la MAISON (house_openings) ni celles des PIÈCES (room_openings).
+Table terrain_gates {
+  id uuid [pk, note: 'Gate.id']
+  terrain_id uuid [not null, ref: > terrains.id, note: 'Terrain sur lequel se trouve la porte']
+  side_index int [not null, note: 'Côté du terrain concerné : le côté i va du point i au point i+1']
+  offset_m float8 [not null, note: 'Distance en mètres depuis le début du côté jusqu’à la porte']
+  width_m float8 [not null, note: 'Largeur de l’ouverture (portillon 1 m, portail 3 m par défaut)']
+  kind gate_kind [not null, note: 'pedestrian = portillon ; vehicle = portail']
+
+  Note: '''
+  [EN BASE · UTILISÉE] Gate : porte d'entrée du terrain, posée sur un côté (étape 1). Le vide qu'elle crée dans la clôture est dessiné sur le plan.
+  Si `terrains.fenced` est faux, la porte marque quand même l'entrée du terrain.
+  '''
+}
+
+// --- Base de la maison (étape 2) --------------------------------------------
+
+// L'emprise de la maison : un rectangle unique posé sur le terrain (longueur × largeur).
+Table houses {
+  id uuid [pk]
+  plan_id uuid [not null, unique, ref: - plans.id, note: 'Un plan a au plus une base (Plan.house peut être null) — relation 1:1. Pointe vers le PLAN, pas vers le terrain']
+  center_x float8 [not null, note: 'Centre de la base, x en mètres']
+  center_y float8 [not null, note: 'Centre de la base, y en mètres']
+  width_m float8 [not null, note: 'Longueur (côté horizontal avant rotation)']
+  height_m float8 [not null, note: 'Largeur (côté vertical avant rotation)']
+  rotation float8 [not null, default: 0, note: 'Orientation en degrés, sens trigonométrique']
+
+  Note: '''
+  [EN BASE · UTILISÉE] HouseBase : emprise rectangulaire de la maison. Doit tenir dans le terrain (avertissement, non bloquant).
+  Les pièces restent LIBRES par rapport à cette base : elle sert de repère, pas de contrainte.
+  « Dans le terrain » est une relation GÉOMÉTRIQUE, il n'y a pas de clé étrangère vers `terrains`.
+  '''
+}
+
+// Les portes de la base de la maison (ex: la porte d'entrée principale).
+Table house_openings {
+  id uuid [pk, note: 'EdgeOpening.id']
+  house_id uuid [not null, ref: > houses.id, note: 'Base de maison qui porte cette ouverture']
+  edge smallint [not null, note: 'Bord de la base : 0 = bas, 1 = droite, 2 = haut, 3 = gauche (repère local avant rotation)']
+  offset_m float8 [not null, note: 'Distance en mètres depuis le début du bord jusqu’à l’ouverture']
+  width_m float8 [not null, note: 'Largeur de l’ouverture']
+  kind opening_kind [not null, note: 'Dans l’interface : entrance (porte d’entrée) ou interior (autre porte). Pas de fenêtre sur la base']
+
+  Note: '''
+  [EN BASE · UTILISÉE] HouseBase.openings : portes percées dans les bords de la base de la maison.
+  Dessinées comme un « condensateur » (deux tirets perpendiculaires au mur avec un vide).
+  '''
+}
+
+// --- Pièces et accès (étape 3) ----------------------------------------------
+
+// Les pièces de la maison : un rectangle chacune (Salon, Chambre, Cuisine, Couloir…).
+Table rooms {
+  id uuid [pk, note: 'Room.id']
+  plan_id uuid [not null, ref: > plans.id, note: 'Plan auquel appartient la pièce (et non la base de la maison : les pièces sont libres par rapport à elle)']
+  position int [not null, default: 0, note: 'Ordre d’affichage dans la liste « Pièces » (Plan.rooms est un tableau ordonné)']
+  label text [not null, note: 'Nom affiché sur le plan, modifiable (ex: « Chambre parentale »)']
+  category room_category [not null, note: 'Type de pièce ; détermine la couleur et les dimensions proposées à l’ajout. `couloir` est une catégorie comme une autre']
+  center_x float8 [not null, note: 'Centre de la pièce, x en mètres']
+  center_y float8 [not null, note: 'Centre de la pièce, y en mètres']
+  width_m float8 [not null, note: 'Largeur avant rotation']
+  height_m float8 [not null, note: 'Hauteur avant rotation']
+  rotation float8 [not null, default: 0, note: 'Orientation en degrés, sens trigonométrique']
+
+  Note: '''
+  [EN BASE · UTILISÉE] Room : rectangle (centre + dimensions + rotation).
+  Règle métier : jamais superposée à une autre pièce du même plan, toujours contenue dans le terrain
+  (validateRoomPlacement, côté client aujourd'hui ; contrainte d'exclusion GIST/PostGIS envisagée côté base).
+  Supprimer une pièce supprime ses ouvertures (room_openings).
+  '''
+}
+
+// Les murs SUPPRIMÉS d'une pièce : une ligne par côté ouvert. Par défaut une pièce a ses 4 murs,
+// donc la table est vide ; supprimer le mur haut d'une pièce ajoute une ligne (room_id, edge = 2).
+Table room_removed_walls {
+  room_id uuid [not null, ref: > rooms.id, note: '`on delete cascade` : supprimer la pièce efface ses murs supprimés']
+  edge smallint [not null, note: 'Côté sans mur : 0 = bas, 1 = droite, 2 = haut, 3 = gauche (repère local avant rotation)']
+
+  indexes {
+    (room_id, edge) [pk]
+  }
+
+  Note: '''
+  [EN BASE · UTILISÉE] Room.removedWalls : côtés dont le mur est supprimé (pièce ouverte sur ce côté, ex: cuisine ouverte sur le salon).
+  Chaque côté est indépendant. Le mur voisin d'une autre pièce, lui, reste dessiné tant qu'il n'est pas supprimé de son côté.
+  L'épaisseur des murs restants vient de `plans.wall_type`.
+  '''
+}
+
+// Les portes ET fenêtres d'une pièce : 2 fenêtres + 2 portes = 4 lignes pour cette pièce.
+Table room_openings {
+  id uuid [pk, note: 'EdgeOpening.id']
+  room_id uuid [not null, ref: > rooms.id, note: '`on delete cascade` : supprimer une pièce supprime ses portes et fenêtres']
+  edge smallint [not null, note: 'Bord de la pièce : 0 = bas, 1 = droite, 2 = haut, 3 = gauche (repère local avant rotation)']
+  offset_m float8 [not null, note: 'Distance en mètres depuis le début du bord jusqu’à l’ouverture']
+  width_m float8 [not null, note: 'Largeur de l’ouverture (porte 0,9 m, fenêtre 1,2 m par défaut)']
+  kind opening_kind [not null, note: 'interior = porte intérieure ; entrance = porte d’entrée ; window = fenêtre']
+
+  Note: '''
+  [EN BASE · UTILISÉE] RoomOpening : portes (interior/entrance) et fenêtres (window) percées dans les bords d'une pièce.
+  Porte = deux tirets perpendiculaires au mur (symbole du condensateur) ; fenêtre = trait cyan sur le mur.
+  '''
+}
+
+// --- Mode « murs » — types présents mais NON utilisés par l'éditeur actuel ----
+
+// Un mur dessiné individuellement (segment + épaisseur). Prévu pour un futur mode « dessin mur par mur » :
+// l'éditeur actuel ne dessine que des pièces rectangulaires, sans murs.
+Table walls {
+  id uuid [pk, note: 'Wall.id']
+  plan_id uuid [not null, ref: > plans.id, note: 'Plan auquel appartient le mur']
+  start_x float8 [not null, note: 'Point de départ du mur, x en mètres']
+  start_y float8 [not null, note: 'Point de départ du mur, y en mètres']
+  end_x float8 [not null, note: 'Point d’arrivée du mur, x en mètres']
+  end_y float8 [not null, note: 'Point d’arrivée du mur, y en mètres']
+  thickness_m float8 [not null, note: 'Épaisseur du mur en mètres']
+
+  Note: '''
+  [EN BASE · RÉSERVÉE] Wall : réservé à un futur mode « dessin mur par mur ». Plan.walls est toujours vide aujourd'hui.
+  Ne pas confondre avec les bords des pièces : dans l'éditeur actuel, une porte se perce sur le bord d'un rectangle (room_openings), pas sur un mur.
+  '''
+}
+
+// Une porte ou fenêtre posée sur un MUR (table walls). Équivalent, pour le futur mode « murs »,
+// de ce que fait room_openings pour les pièces.
+Table wall_openings {
+  id uuid [pk, note: 'Opening.id']
+  wall_id uuid [not null, ref: > walls.id, note: 'Mur qui porte l’ouverture']
+  type wall_opening_type [not null, note: 'door = porte ; window = fenêtre']
+  offset_m float8 [not null, note: 'Distance en mètres depuis le début du mur (wall.start)']
+  width_m float8 [not null, note: 'Largeur de l’ouverture']
+
+  Note: '''
+  [EN BASE · RÉSERVÉE] Opening (ouverture sur un mur). Ne pas confondre avec room_openings / house_openings, utilisés par l'éditeur actuel.
+  Plan.openings est vide aujourd'hui.
+  '''
+}
+
+// Table de liaison pièce <-> murs : une pièce est bordée par plusieurs murs,
+// et un mur mitoyen borde deux pièces (relation plusieurs-à-plusieurs).
+Table room_walls {
+  room_id uuid [not null, ref: > rooms.id, note: 'Pièce bordée par le mur']
+  wall_id uuid [not null, ref: > walls.id, note: 'Mur qui borde la pièce']
+
+  indexes {
+    (room_id, wall_id) [pk]
+  }
+
+  Note: '''
+  [EN BASE · RÉSERVÉE] Room.wallIds (optionnel) : murs qui bordent une pièce, pour le mode « murs ».
+  Sert par exemple à calculer la surface habitable d'une zone fermée par des murs.
+  '''
+}
+
+// --- Second œuvre (Level 2) — types présents, pas encore d'interface ----------
+
+// Le mobilier et les équipements posés dans le plan (canapé, plaque de cuisson, lavabo…).
+Table furniture_items {
+  id uuid [pk, note: 'FurnitureItem.id']
+  plan_id uuid [not null, ref: > plans.id, note: 'Plan dans lequel le meuble est posé']
+  category furniture_category [not null, note: 'Famille : mobilier, cuisine ou salle-de-bain']
+  label text [not null, note: 'Nom du meuble (ex: « Canapé 3 places »)']
+  position_x float8 [not null, note: 'Position du meuble, x en mètres']
+  position_y float8 [not null, note: 'Position du meuble, y en mètres']
+  rotation float8 [not null, default: 0, note: 'Orientation en degrés, sens trigonométrique']
+  width_m float8 [not null, note: 'Largeur du meuble']
+  height_m float8 [not null, note: 'Profondeur/hauteur du meuble vue de dessus']
+
+  Note: '''
+  [EN BASE · RÉSERVÉE] FurnitureItem : meuble ou équipement posé (second œuvre, niveau 2 — écran « SecondOeuvreView » encore vide).
+  Source de l'inventaire / liste d'achats : l'inventaire est CALCULÉ (compter les meubles par catégorie et libellé), jamais stocké.
+  '''
+}
+
+// Les symboles techniques des réseaux : électricité (prise, interrupteur, lumière) et plomberie (eau).
+Table technical_symbols {
+  id uuid [pk, note: 'TechnicalSymbol.id']
+  plan_id uuid [not null, ref: > plans.id, note: 'Plan dans lequel le symbole est posé']
+  type technical_symbol_type [not null, note: 'prise, interrupteur, point-lumineux, arrivee-eau ou evacuation-eau']
+  position_x float8 [not null, note: 'Position du symbole, x en mètres']
+  position_y float8 [not null, note: 'Position du symbole, y en mètres']
+
+  Note: '''
+  [EN BASE · RÉSERVÉE] TechnicalSymbol : repères pour les artisans (électricien, plombier). Second œuvre, niveau 2, pas encore d'interface.
+  Un symbole n'a ni dimension ni rotation : seulement un type et une position.
+  '''
+}
+
+// Les revêtements d'une pièce : matière du sol, couleur des murs.
+Table finishes {
+  room_id uuid [pk, ref: - rooms.id, note: 'Finish.roomId : au plus un revêtement par pièce — relation 1:1']
+  floor_texture text [note: 'Texture du sol (ex: « carrelage », « parquet »)']
+  wall_color text [note: 'Couleur des murs (ex: « #f5f5f4 »)']
+
+  Note: '''
+  [EN BASE · RÉSERVÉE] Finish : revêtements d'une pièce (second œuvre, niveau 2). Les deux champs sont optionnels.
+  '''
+}
+
+// ----------------------------------------------------------------------------
+// Groupes (couleurs dans dbdiagram.io)
+// ----------------------------------------------------------------------------
+
+TableGroup base_supabase [color: #16a34a] {
+  auth.users
+  profiles
+}
+
+TableGroup plan_racine [color: #2563eb] {
+  plans
+}
+
+TableGroup etape_1_terrain_peripherie [color: #ca8a04] {
+  terrains
+  terrain_points
+  roads
+  terrain_gates
+}
+
+TableGroup etape_2_base_maison [color: #0891b2] {
+  houses
+  house_openings
+}
+
+TableGroup etape_3_pieces_acces [color: #9333ea] {
+  rooms
+  room_openings
+  room_removed_walls
+}
+
+TableGroup reserve_non_utilise [color: #71717a] {
+  walls
+  wall_openings
+  room_walls
+  furniture_items
+  technical_symbols
+  finishes
+}
