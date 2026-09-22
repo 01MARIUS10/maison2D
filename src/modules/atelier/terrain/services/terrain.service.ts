@@ -324,6 +324,22 @@ export function computeTerrainFromManualDrawing(points: PlanPoint[]): Terrain {
   }
 }
 
+/**
+ * Terrain par défaut pour la pose manuelle des bornes : un polygone régulier à `sides` côtés
+ * (carré, pentagone, hexagone...), centré sur `center`, de rayon `radius` (m). Sert de point de
+ * départ que l'utilisateur affine ensuite en glissant chaque borne sur le canvas.
+ */
+export function regularPolygonTerrain(sides: number, center: PlanPoint, radius: number): Terrain {
+  const points: PlanPoint[] = Array.from({ length: sides }, (_, index) => {
+    const angle = Math.PI / 2 + (index * 2 * Math.PI) / sides
+    return {
+      x: Math.round((center.x + radius * Math.cos(angle)) * 100) / 100,
+      y: Math.round((center.y + radius * Math.sin(angle)) * 100) / 100,
+    }
+  })
+  return computeTerrainFromManualDrawing(points)
+}
+
 export async function saveTerrain(_terrain: Terrain): Promise<Terrain> {
   throw new Error('Not implemented')
 }

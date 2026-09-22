@@ -9,6 +9,7 @@ import {
   parseCoordinatePair,
   parseCoordinateValue,
   nextBottomAlignmentStep,
+  regularPolygonTerrain,
   roadAlongSide,
   terrainCentroid,
   terrainSideAngleDeg,
@@ -204,6 +205,54 @@ function confirmGpsReset() {
   showGpsForm.value = false
 }
 
+// --- Pose manuelle des bornes (sans carte) ----------------------------------
+// Poser directement un polygone régulier par défaut (carré, pentagone, hexagone...) sur le canvas,
+// que l'utilisateur affine ensuite en glissant chaque borne (les poignées de sommets existent déjà
+// à l'étape terrain — voir StructureEditorView).
+
+/** Rayon (m) du polygone par défaut : pour un carré, un côté d'environ 10 m. */
+const MANUAL_DEFAULT_RADIUS = 7
+
+const MANUAL_SHAPE_PRESETS = [
+  { sides: 3, label: 'Triangle' },
+  { sides: 4, label: 'Carré' },
+  { sides: 5, label: 'Pentagone' },
+  { sides: 6, label: 'Hexagone' },
+]
+
+const showManualForm = ref(false)
+const manualSides = ref(4)
+const manualFormError = ref<string | null>(null)
+
+function openManualForm() {
+  manualSides.value = terrain.value?.vertices.length ?? 4
+  manualFormError.value = null
+  showManualForm.value = true
+}
+
+function confirmManualPlacement() {
+  const sides = Math.round(manualSides.value)
+  if (!Number.isFinite(sides) || sides < 3) {
+    manualFormError.value = 'Un terrain nécessite au moins 3 sommets.'
+    return
+  }
+
+  const previous = terrain.value
+  const center = previous ? terrainCentroid(previous) : { x: props.origin.x + MANUAL_DEFAULT_RADIUS, y: props.origin.y + MANUAL_DEFAULT_RADIUS }
+  const newTerrain = regularPolygonTerrain(sides, center, MANUAL_DEFAULT_RADIUS)
+  if (previous) {
+    newTerrain.road = previous.road
+    // Numéros de côté : ne les garder que si le nombre de sommets n'a pas changé (voir confirmGpsReset).
+    if (previous.vertices.length === newTerrain.vertices.length) {
+      newTerrain.fenced = previous.fenced
+      newTerrain.gates = previous.gates
+    }
+  }
+  planStore.setTerrain(props.planId, newTerrain)
+  emit('refit')
+  showManualForm.value = false
+}
+
 // --- Périphérie : route, clôture, portes d'entrée --------------------------
 
 const sideOptions = computed(() => {
@@ -289,9 +338,14 @@ function onFencedChange(e: Event) {
     <div class="rounded-lg border border-gray-200 p-3">
       <div class="flex items-center justify-between gap-2">
         <h2 class="text-sm font-semibold text-gray-900">Bornes du terrain</h2>
-        <button type="button" class="whitespace-nowrap text-xs font-medium text-gray-900 underline" @click="openGpsForm">
-          Réinitialiser via carte
-        </button>
+        <div class="flex items-center gap-2">
+          <button type="button" class="whitespace-nowrap text-xs font-medium text-gray-900 underline" @click="openManualForm">
+            Poser manuellement
+          </button>
+          <button type="button" class="whitespace-nowrap text-xs font-medium text-gray-900 underline" @click="openGpsForm">
+            Réinitialiser via carte
+          </button>
+        </div>
       </div>
 
       <ul class="mt-2 space-y-1 text-sm text-gray-600">
@@ -520,13 +574,22 @@ function onFencedChange(e: Event) {
   <!-- Atelier vide : on crée le terrain avec la même saisie de coordonnées GPS que pour le réinitialiser. -->
   <div v-else class="rounded-lg border border-gray-200 p-3">
     <h2 class="text-sm font-semibold text-gray-900">Terrain</h2>
-    <button
-      type="button"
-      class="mt-3 rounded-md bg-gray-900 px-3 py-1.5 text-sm font-medium text-white"
-      @click="openGpsForm"
-    >
-      Définir le terrain via carte
-    </button>
+    <div class="mt-3 flex flex-wrap gap-2">
+      <button
+        type="button"
+        class="rounded-md bg-gray-900 px-3 py-1.5 text-sm font-medium text-white"
+        @click="openGpsForm"
+      >
+        Définir le terrain via carte
+      </button>
+      <button
+        type="button"
+        class="rounded-md border border-gray-300 px-3 py-1.5 text-sm font-medium text-gray-700 hover:bg-gray-50"
+        @click="openManualForm"
+      >
+        Poser les bornes manuellement
+      </button>
+    </div>
   </div>
 
   <Teleport to="body">
@@ -604,6 +667,71 @@ function onFencedChange(e: Event) {
               {{ terrain ? 'Réinitialiser le terrain' : 'Créer le terrain' }}
             </button>
           </div>
+        </div>
+      </div>
+    </div>
+  </Teleport>
+
+  <Teleport to="body">
+    <div
+      v-if="showManualForm"
+      class="fixed inset-0 z-50 flex items-center justify-center bg-black/50 p-4"
+      @click.self="showManualForm = false"
+    >
+      <div class="w-full max-w-sm rounded-lg bg-white p-4 shadow-xl">
+        <div class="flex items-center justify-between">
+          <h3 class="text-sm font-semibold text-gray-900">Poser les bornes manuellement</h3>
+          <button type="button" class="text-gray-400 hover:text-gray-600" aria-label="Fermer" @click="showManualForm = false">
+            ✕
+          </button>
+        </div>
+
+        <p class="mt-2 text-xs text-gray-500">
+          Une forme par défaut est posée sur le plan ; glisse ensuite chaque borne sur le canvas pour l'ajuster.
+        </p>
+
+        <div class="mt-3 flex flex-wrap gap-1.5">
+          <button
+            v-for="preset in MANUAL_SHAPE_PRESETS"
+            :key="preset.sides"
+            type="button"
+            class="rounded-md border px-2 py-1 text-xs"
+            :class="
+              manualSides === preset.sides
+                ? 'border-gray-900 bg-gray-900 text-white'
+                : 'border-gray-300 text-gray-700 hover:bg-gray-50'
+            "
+            @click="manualSides = preset.sides"
+          >
+            {{ preset.label }} ({{ preset.sides }})
+          </button>
+        </div>
+
+        <label class="mt-3 flex items-center justify-between gap-2 text-xs text-gray-600">
+          Nombre de sommets
+          <input
+            v-model.number="manualSides"
+            type="number"
+            min="3"
+            max="20"
+            step="1"
+            class="w-16 rounded-md border border-gray-300 px-2 py-1 text-center text-sm text-gray-900 focus:border-gray-900 focus:outline-none"
+          />
+        </label>
+
+        <p v-if="manualFormError" class="mt-2 text-xs text-red-600">{{ manualFormError }}</p>
+
+        <div class="mt-4 flex justify-end gap-2">
+          <button
+            type="button"
+            class="rounded-md border border-gray-300 px-3 py-1.5 text-xs text-gray-700 hover:bg-gray-50"
+            @click="showManualForm = false"
+          >
+            Annuler
+          </button>
+          <button type="button" class="rounded-md bg-gray-900 px-3 py-1.5 text-xs font-medium text-white" @click="confirmManualPlacement">
+            {{ terrain ? 'Remplacer le terrain' : 'Poser le terrain' }}
+          </button>
         </div>
       </div>
     </div>
